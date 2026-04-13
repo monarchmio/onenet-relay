@@ -1,12 +1,13 @@
 """
-OneNET HTTP推送 验证+转发服务 (Vercel Serverless)
+OneNET HTTP推送 验证+转发服务 (Vercel Serverless - Flask WSGI)
 """
-from http.server import BaseHTTPRequestHandler
-from urllib.parse import urlparse, parse_qs
+from flask import Flask, request, Response
 import hashlib
 import base64
 import json
 import os
+
+app = Flask(__name__)
 
 TOKEN = os.environ.get("ONENET_TOKEN", "mytoken")
 FORWARD_URL = os.environ.get("FORWARD_URL", "")
@@ -18,55 +19,45 @@ def calculate_signature(token, nonce, msg):
     return base64.b64encode(md5.digest()).decode('utf-8')
 
 
-class handler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        parsed = urlparse(self.path)
-        params = parse_qs(parsed.query)
+@app.route('/', defaults={'path': ''}, methods=['GET', 'POST'])
+@app.route('/<path:path>', methods=['GET', 'POST'])
+def catch_all(path):
+    if request.method == 'GET':
+        msg = request.args.get('msg')
+        nonce = request.args.get('nonce')
+        signature = request.args.get('signature')
 
-        msg = params.get('msg', [None])[0]
-        nonce = params.get('nonce', [None])[0]
-        signature = params.get('signature', [None])[0]
+        print(f"GET: msg={msg}, nonce={nonce}, signature={signature}")
 
         if not msg:
-            self.send_response(200)
-            self.send_header('Content-Type', 'text/plain; charset=utf-8')
-            self.end_headers()
-            self.wfile.write("OneNET Relay Service is running".encode('utf-8'))
-            return
+            return Response("OneNET Relay Service is running", status=200,
+                            content_type='text/plain; charset=utf-8')
 
-        # 签名验证（可选）
         if nonce and signature:
             expected = calculate_signature(TOKEN, nonce, msg)
-            print(f"签名校验: expected={expected}, received={signature}, match={expected == signature}")
+            print(f"签名: expected={expected}, received={signature}, match={expected == signature}")
 
-        # 关键：返回纯文本 msg
-        self.send_response(200)
-        self.send_header('Content-Type', 'text/plain; charset=utf-8')
-        self.end_headers()
-        self.wfile.write(msg.encode('utf-8'))
+        # 关键：返回纯 msg 文本，无任何多余字符
+        return Response(msg, status=200, content_type='text/plain; charset=utf-8')
 
-    def do_POST(self):
-        content_length = int(self.headers.get('Content-Length', 0))
-        body = self.rfile.read(content_length) if content_length else b''
+    elif request.method == 'POST':
+        try:
+            body = request.get_data()
+            print(f"POST: {body.decode('utf-8', errors='replace')[:500]}")
 
-        print(f"POST推送: {body.decode('utf-8', errors='replace')[:500]}")
+            if FORWARD_URL:
+                try:
+                    import urllib.request
+                    req = urllib.request.Request(
+                        f"{FORWARD_URL}/api/onenet/push",
+                        data=body,
+                        headers={"Content-Type": "application/json"},
+                        method="POST"
+                    )
+                    urllib.request.urlopen(req, timeout=3)
+                except Exception as e:
+                    print(f"转发失败: {e}")
+        except Exception as e:
+            print(f"POST错误: {e}")
 
-        # 转发到本地后端
-        if FORWARD_URL:
-            try:
-                import urllib.request
-                req = urllib.request.Request(
-                    f"{FORWARD_URL}/api/onenet/push",
-                    data=body,
-                    headers={"Content-Type": "application/json"},
-                    method="POST"
-                )
-                urllib.request.urlopen(req, timeout=3)
-            except Exception as e:
-                print(f"转发失败: {e}")
-
-        # 必须快速返回200
-        self.send_response(200)
-        self.send_header('Content-Type', 'text/plain')
-        self.end_headers()
-        self.wfile.write(b"OK")
+        return Response("OK", status=200, content_type='text/plain')
